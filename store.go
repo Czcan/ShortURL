@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/gob"
+	"encoding/json"
 	"flag"
 	"io"
 	"log"
@@ -13,7 +13,7 @@ const saveQueueLength = 1000
 
 var (
 	listenAddr = flag.String("http", ":8099", "http listen address")
-	dataFile   = flag.String("file", "store.gob", "data store file name")
+	dataFile   = flag.String("file", "store.json", "data store file name")
 	hostName   = flag.String("host", "localhost:8099", "host name and port")
 )
 
@@ -35,7 +35,7 @@ func NewURLStore(filename string) *URLStore {
 	}
 
 	if err := s.load(filename); err != nil {
-		log.Fatal("Error loading URLStore:", err)
+		log.Println("Error loading URLStore:", err)
 	}
 	go s.saveLoop(filename)
 	return s
@@ -44,11 +44,11 @@ func NewURLStore(filename string) *URLStore {
 func (s *URLStore) load(filename string) error {
 	f, err := os.Open(filename)
 	if err != nil {
-		log.Fatal("Error opening URLStore: ", err)
+		log.Println("Error opening URLStore: ", err)
 	}
 	defer f.Close()
 
-	d := gob.NewDecoder(f)
+	d := json.NewDecoder(f)
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
@@ -59,6 +59,7 @@ func (s *URLStore) load(filename string) error {
 	if err == io.EOF {
 		return nil
 	}
+	log.Println("Error decoding URLStore: ", err)
 	return err
 }
 
@@ -105,11 +106,11 @@ func (s *URLStore) saveLoop(filename string) {
 	}
 	defer f.Close()
 
-	e := gob.NewEncoder(f)
+	e := json.NewEncoder(f)
 	for {
 		r := <-s.save
 		if err = e.Encode(&r); err != nil {
-			log.Fatal("Error saving to URLStore: ", err)
+			log.Println("Error saving to URLStore: ", err)
 		}
 	}
 }
