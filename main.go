@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 )
@@ -12,12 +13,14 @@ URL: <input type="text" name="url">
 </form>
 `
 
-var store = NewURLStore("store.gob")
+var store *URLStore
 
 func main() {
+	flag.Parse()
+	store = NewURLStore(*dataFile)
 	http.HandleFunc("/add", Add)
 	http.HandleFunc("/", Redirect)
-	http.ListenAndServe(":8099", nil)
+	http.ListenAndServe(*listenAddr, nil)
 }
 
 // 从表单读取长URL
@@ -32,7 +35,7 @@ func Add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := store.Put(url)
-	fmt.Fprintf(w, "http://localhost:8099:%s", key)
+	fmt.Fprintf(w, "http://%s:%s", *hostName, key)
 }
 
 // 输入shortURL -> 重定向到 longURL

@@ -2,16 +2,25 @@ package main
 
 import (
 	"encoding/gob"
+	"flag"
 	"io"
 	"log"
 	"os"
 	"sync"
 )
 
+const saveQueueLength = 1000
+
+var (
+	listenAddr = flag.String("http", ":8099", "http listen address")
+	dataFile   = flag.String("file", "store.gob", "data store file name")
+	hostName   = flag.String("host", "localhost:8099", "host name and port")
+)
+
 type URLStore struct {
 	urls map[string]string
 	mu   sync.RWMutex
-	file *os.File
+	save chan record
 }
 
 type record struct {
@@ -20,26 +29,26 @@ type record struct {
 }
 
 func NewURLStore(filename string) *URLStore {
-	s := &URLStore{urls: make(map[string]string)}
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		log.Fatal("Error opening URLStore:", err)
+	s := &URLStore{
+		urls: make(map[string]string),
+		save: make(chan record, saveQueueLength),
 	}
 
-	s.file = f
-	if err := s.load(); err != nil {
+	if err := s.load(filename); err != nil {
 		log.Fatal("Error loading URLStore:", err)
 	}
-
+	go s.saveLoop(filename)
 	return s
 }
 
-func (s *URLStore) load() error {
-	if _, err := s.file.Seek(0, 0); err != nil {
-		return err
+func (s *URLStore) load(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		log.Fatal("Error opening URLStore: ", err)
 	}
-	d := gob.NewDecoder(s.file)
-	var err error
+	defer f.Close()
+
+	d := gob.NewDecoder(f)
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
@@ -81,17 +90,26 @@ func (s *URLStore) Put(url string) string { // longURL -> get shortURL
 	for {
 		key := genKey(s.Count())
 		if s.Set(key, url) {
-			if err := s.save(key, url); err != nil {
-				log.Fatal("Error saving to URLStore: ", err)
-			}
+			s.save <- record{key, url}
 			return key
 		}
 	}
 	// shouldn't get shortURL
-	return ""
+	panic("shouldn't get here")
 }
 
-func (s *URLStore) save(key, url string) error {
-	e := gob.NewEncoder(s.file)
-	return e.Encode(record{key, url})
+func (s *URLStore) saveLoop(filename string) {
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		log.Fatal("Error opening URLStore: ", err)
+	}
+	defer f.Close()
+
+	e := gob.NewEncoder(f)
+	for {
+		r := <-s.save
+		if err = e.Encode(&r); err != nil {
+			log.Fatal("Error saving to URLStore: ", err)
+		}
+	}
 }
