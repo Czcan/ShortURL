@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/rpc"
 )
 
 const AddForm = `
@@ -13,11 +14,27 @@ URL: <input type="text" name="url">
 </form>
 `
 
-var store *URLStore
+var (
+	store      Store
+	listenAddr = flag.String("http", ":8080", "http listen address")
+	dataFile   = flag.String("file", "store.json", "data store file name")
+	hostName   = flag.String("host", "localhost:8080", "host name and port")
+	masterAddr = flag.String("master", "", "RPC master address")
+	rpcEnabled = flag.Bool("rpc", false, "enable RPC server")
+)
 
 func main() {
 	flag.Parse()
-	store = NewURLStore(*dataFile)
+	if *masterAddr != "" {
+		store = NewProxyStore(*masterAddr)
+	} else {
+		store = NewURLStore(*dataFile)
+	}
+
+	if *rpcEnabled { // the master is the rpc server
+		rpc.RegisterName("Store", store)
+		rpc.HandleHTTP()
+	}
 	http.HandleFunc("/add", Add)
 	http.HandleFunc("/", Redirect)
 	http.ListenAndServe(*listenAddr, nil)
@@ -29,21 +46,25 @@ func main() {
 func Add(w http.ResponseWriter, r *http.Request) {
 	url := r.FormValue("url")
 	if url == "" {
-		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, AddForm)
 		return
 	}
 
-	key := store.Put(url)
+	var key string
+	if err := store.Put(&url, &key); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	fmt.Fprintf(w, "http://%s:%s", *hostName, key)
 }
 
 // 输入shortURL -> 重定向到 longURL
 func Redirect(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[1:]
-	url := store.Get(key)
-	if url == "" {
-		http.NotFound(w, r)
+	var url string
+	if err := store.Get(&key, &url); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 

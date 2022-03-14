@@ -2,20 +2,25 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
+	"errors"
 	"io"
 	"log"
+	"net/rpc"
 	"os"
 	"sync"
 )
 
 const saveQueueLength = 1000
 
-var (
-	listenAddr = flag.String("http", ":8099", "http listen address")
-	dataFile   = flag.String("file", "store.json", "data store file name")
-	hostName   = flag.String("host", "localhost:8099", "host name and port")
-)
+type Store interface {
+	Put(url, key *string) error
+	Get(key, url *string) error
+}
+
+type ProxyStore struct {
+	urls   *URLStore // local cache
+	client *rpc.Client
+}
 
 type URLStore struct {
 	urls map[string]string
@@ -29,22 +34,23 @@ type record struct {
 }
 
 func NewURLStore(filename string) *URLStore {
-	s := &URLStore{
-		urls: make(map[string]string),
-		save: make(chan record, saveQueueLength),
+	s := &URLStore{urls: make(map[string]string)}
+
+	if filename != "" {
+		s.save = make(chan record, saveQueueLength)
+		if err := s.load(filename); err != nil {
+			log.Println("Error loading URLStore: ", err)
+		}
+		go s.saveLoop(filename)
 	}
 
-	if err := s.load(filename); err != nil {
-		log.Println("Error loading URLStore:", err)
-	}
-	go s.saveLoop(filename)
 	return s
 }
 
 func (s *URLStore) load(filename string) error {
 	f, err := os.Open(filename)
 	if err != nil {
-		log.Println("Error opening URLStore: ", err)
+		return err
 	}
 	defer f.Close()
 
@@ -52,51 +58,55 @@ func (s *URLStore) load(filename string) error {
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
-			s.Set(r.Key, r.URL)
+			s.Set(&r.Key, &r.URL)
 		}
 	}
 
 	if err == io.EOF {
 		return nil
 	}
-	log.Println("Error decoding URLStore: ", err)
+
 	return err
 }
 
-func (s *URLStore) Get(key string) string { // get shortURL from LongURL
+func (s *URLStore) Get(key, url *string) error { // get the longURL from shortURL
 	s.mu.RLock() // 防止脏读
 	defer s.mu.RUnlock()
-	return s.urls[key]
+	if u, ok := s.urls[*key]; ok {
+		*url = u
+		return nil
+	}
+	return errors.New("key not found")
 }
 
-func (s *URLStore) Set(key string, url string) bool {
+func (s *URLStore) Set(key, url *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, present := s.urls[key]
-	if present {
-		return false
+	if _, present := s.urls[*key]; present {
+		return errors.New("key already exists")
 	}
 
-	s.urls[key] = url
-	return true
+	s.urls[*key] = *url
+	return nil
 }
 
-func (s *URLStore) Count() int {
+func (s *URLStore) count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.urls)
 }
 
-func (s *URLStore) Put(url string) string { // longURL -> get shortURL
+func (s *URLStore) Put(url, key *string) error { // longURL -> get shortURL
 	for {
-		key := genKey(s.Count())
-		if s.Set(key, url) {
-			s.save <- record{key, url}
-			return key
+		*key = genKey(s.count())
+		if err := s.Set(key, url); err == nil {
+			break
 		}
 	}
-	// shouldn't get shortURL
-	panic("shouldn't get here")
+	if s.save != nil {
+		s.save <- record{*key, *url}
+	}
+	return nil
 }
 
 func (s *URLStore) saveLoop(filename string) {
@@ -113,4 +123,34 @@ func (s *URLStore) saveLoop(filename string) {
 			log.Println("Error saving to URLStore: ", err)
 		}
 	}
+}
+
+func NewProxyStore(addr string) *ProxyStore {
+	client, err := rpc.DialHTTP("tcp", addr)
+	if err != nil {
+		log.Println("Error constrcuting ProxyStore: ", err)
+	}
+	return &ProxyStore{urls: NewURLStore(""), client: client}
+}
+
+func (s *ProxyStore) Get(key, url *string) error {
+	if err := s.urls.Get(key, url); err == nil {
+		return nil
+	}
+
+	//rpc call to master
+	if err := s.client.Call("Store.Get", key, url); err != nil {
+		return err
+	}
+	s.urls.Set(key, url) // update local cache
+	return nil
+}
+
+func (s *ProxyStore) Put(url, key *string) error {
+	// rpc call to master
+	if err := s.client.Call("Store.Put", url, key); err != nil {
+		return err
+	}
+	s.urls.Set(key, url) // update local cache
+	return nil
 }
